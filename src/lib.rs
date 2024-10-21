@@ -17,8 +17,8 @@
 //! // load the srtm tile: .hgt file
 //! let tile = Tile::from_file(filename).unwrap();
 //! // and finally, retrieve our elevation for Veli Brig
-//! let elevation = tile.get(coord);
-//! // test with a ± 5m
+//! let elevation = tile.get(coord).unwrap();
+//! // test with a ± 5m accuracy
 //! assert!((TRUE_ELEV - 5..TRUE_ELEV + 5).contains(&elevation));
 //! println!("Veli Brig:\n\t- coordinates: {coord:?}\n\t- elevation\n\t\t- actual: {TRUE_ELEV}m\n\t\t- calculated: {elevation}m");
 //! ```
@@ -43,10 +43,10 @@ pub enum Resolution {
 impl Resolution {
     /// the number of rows and columns in an SRTM data file of [`Resolution`]
     pub const fn extent(&self) -> usize {
-        match self {
-            Resolution::SRTM05 => EXTENT * 2 + 1,
-            Resolution::SRTM1 => EXTENT + 1,
-            Resolution::SRTM3 => EXTENT / 3 + 1,
+        1 + match self {
+            Resolution::SRTM05 => EXTENT * 2,
+            Resolution::SRTM1 => EXTENT,
+            Resolution::SRTM3 => EXTENT / 3,
         }
     }
     /// total file length in BigEndian, total file length in bytes is [`Resolution::total_len()`] * 2
@@ -75,9 +75,9 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Default)]
 pub struct Coord {
     /// latitude: north-south
-    lat: f64,
+    pub lat: f64,
     /// longitude: east-west
-    lon: f64,
+    pub lon: f64,
 }
 impl Coord {
     pub fn new(lat: impl Into<f64>, lon: impl Into<f64>) -> Self {
@@ -112,7 +112,7 @@ impl<F1: Into<f64>, F2: Into<f64>> From<(F1, F2)> for Coord {
     }
 }
 impl Tile {
-    fn new_empty(lat: i32, lon: i32, res: Resolution) -> Tile {
+    fn empty(lat: i32, lon: i32, res: Resolution) -> Tile {
         Tile {
             latitude: lat,
             longitude: lon,
@@ -129,7 +129,7 @@ impl Tile {
         let file = File::open(&path).map_err(|_| Error::Read)?;
         // eprintln!("file: {file:?}");
         let reader = BufReader::new(file);
-        let mut tile = Tile::new_empty(lat, lon, res);
+        let mut tile = Tile::empty(lat, lon, res);
         tile.data = parse(reader, tile.resolution).map_err(|e| {
             eprintln!("parse error: {e:#?}");
             Error::Read
@@ -139,7 +139,10 @@ impl Tile {
 
     /// the maximum height that this [`Tile`] contains
     pub fn max_height(&self) -> i16 {
-        *(self.data.iter().max().unwrap())
+        *self.data.iter().max().unwrap_or(&0)
+    }
+    pub fn min_height(&self) -> i16 {
+        *self.data.iter().min().unwrap_or(&0)
     }
     /// get lower-left corner's latitude and longitude
     /// it's needed for [`Tile::get_offset()`]
@@ -164,7 +167,7 @@ impl Tile {
     /// # Panics
     /// If this [`Tile`] doesn't contain `coord`'s elevation
     /// *NOTE*: shouldn't happen if [`get_filename()`] was used
-    pub fn get<C: Into<Coord>>(&self, coord: C) -> i16 {
+    pub fn get(&self, coord: impl Into<Coord>) -> Option<&i16> {
         let coord: Coord = coord.into();
         let offset = self.get_offset(coord);
         let lat = coord.lat.trunc() as i32;
@@ -179,16 +182,28 @@ impl Tile {
             "hgt lon: {}, coord lon: {lon}",
             self.longitude
         );
-        // eprintln!("offset: ({}, {})", offset.1, offset.0);
-        self.get_at_offset(offset.1, offset.0)
+        let elev = self.get_at_offset(offset.1, offset.0);
+        if elev.is_some_and(|e| *e == -9999 || *e == i16::MIN) {
+            eprintln!(
+                "WARNING: in file {:?} {coord:?} doesn't contain a valid elevation: {elev:?}",
+                get_filename((self.latitude, self.longitude))
+            );
+            None
+        } else {
+            elev
+        }
     }
 
-    fn get_at_offset(&self, x: usize, y: usize) -> i16 {
-        self.data[self.idx(x, y)]
+    fn get_at_offset(&self, x: usize, y: usize) -> Option<&i16> {
+        self.data.get(self.idx(x, y))
     }
 
     fn idx(&self, x: usize, y: usize) -> usize {
-        assert!(x < self.resolution.extent() && y < self.resolution.extent());
+        assert!(
+            x < self.resolution.extent() && y < self.resolution.extent(),
+            "extent: {}, x: {x}, y: {y}",
+            self.resolution.extent()
+        );
         y * self.resolution.extent() + x
     }
 }
@@ -205,7 +220,7 @@ fn get_resolution<P: AsRef<Path>>(path: P) -> Option<Resolution> {
         } else if len == Resolution::SRTM3.total_len() * 2 {
             Some(Resolution::SRTM3)
         } else {
-            eprintln!("unknown filesize: {}", len);
+            eprintln!("unknown filesize: {len}");
             None
         }
     };
@@ -391,6 +406,6 @@ mod tests {
         assert_eq!(tile.data.len(), Resolution::SRTM1.total_len());
 
         let elev = tile.get(coord);
-        assert_eq!(elev, 258);
+        assert_eq!(elev, Some(&258));
     }
 }
